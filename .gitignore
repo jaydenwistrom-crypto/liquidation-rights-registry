@@ -1,0 +1,6 @@
+out/
+cache/
+lib/
+.env
+__pycache__/
+*.pyc
