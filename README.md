@@ -92,7 +92,41 @@ function getRights(address borrower) external view returns (
 
 ---
 
-## Integration (Python)
+## Integration (TypeScript / viem)
+
+```bash
+npm install viem
+```
+
+```typescript
+import { createRegistryClient } from './client'
+
+const registry = createRegistryClient({
+  rpcUrl:     'https://mainnet.base.org',
+  privateKey: process.env.PRIVATE_KEY as `0x${string}`,
+})
+
+// Before firing — check if someone else holds priority
+if (await registry.otherHoldsRights(borrower)) {
+  console.log('backing off — another liquidator has rights')
+} else {
+  await registry.register(borrower)          // stake 0.005 ETH
+  // ... execute your Aave liquidation here (unchanged) ...
+  await registry.recordExecution(borrower)   // reclaims stake
+}
+
+// Slash a registration that expired without execution (earn 50% bounty)
+if (await registry.isSlashable(borrower)) {
+  const tx = await registry.slash(borrower)
+  console.log('slashed:', tx)
+}
+```
+
+Full TypeScript client: [`client.ts`](client.ts)
+
+---
+
+## Integration (Python / web3.py)
 
 ```python
 from web3 import Web3
@@ -128,7 +162,7 @@ else:
     # sign and send
 ```
 
-Full reference client: [`liquidation_rights_client.py`](liquidation_rights_client.py)
+Full Python client: [`liquidation_rights_client.py`](liquidation_rights_client.py)
 
 ---
 

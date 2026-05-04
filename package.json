@@ -1,0 +1,14 @@
+{
+  "name": "liquidation-rights-registry",
+  "version": "1.0.0",
+  "description": "TypeScript client for LiquidationRightsRegistry on Base mainnet",
+  "main": "client.ts",
+  "type": "module",
+  "peerDependencies": {
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
