@@ -147,12 +147,23 @@ class LiquidationRightsClient:
         if not self._enabled:
             return None
         try:
+            borrower_addr = Web3.to_checksum_address(borrower)
+            liq, stake, _, _, active = self._contract.functions.getRights(
+                borrower_addr
+            ).call()
+            if active:
+                if liq.lower() == self._owner.lower():
+                    log.info(f"rights already active  borrower={borrower[:10]}…  stake={stake}")
+                    return "already-active"
+                log.info(f"rights held by another liquidator  borrower={borrower[:10]}…")
+                return None
+
             with open(SIGNER_LOCK, "w") as _lf:
                 fcntl.flock(_lf, fcntl.LOCK_EX)
                 try:
                     base_fee = self._w3.eth.get_block("latest").get("baseFeePerGas", 1_000_000)
                     tx = self._contract.functions.register(
-                        Web3.to_checksum_address(borrower)
+                        borrower_addr
                     ).build_transaction({
                         "chainId":              8453,
                         "gas":                  80_000,
@@ -175,41 +186,68 @@ class LiquidationRightsClient:
             log.warning(f"register failed for {borrower[:10]}…: {exc}")
             return None
 
-    def record_execution(self, borrower: str) -> Optional[str]:
+    def record_execution(self, borrower: str, max_attempts: int = 3) -> Optional[str]:
         """
-        Record a successful liquidation and reclaim the stake.
-        Returns tx hash or None on failure. Non-blocking — a failed reclaim
-        is a lost stake, not a blocked liquidation.
+        Record a successful liquidation and reclaim the 0.005 ETH stake.
+        Waits for receipt and retries up to max_attempts times on revert.
+        Checks on-chain state before each attempt to skip if already recorded.
+        Returns confirmed tx hash or None if all attempts failed.
         """
         if not self._enabled:
             return None
-        try:
-            with open(SIGNER_LOCK, "w") as _lf:
-                fcntl.flock(_lf, fcntl.LOCK_EX)
-                try:
-                    base_fee = self._w3.eth.get_block("latest").get("baseFeePerGas", 1_000_000)
-                    tx = self._contract.functions.recordExecution(
-                        Web3.to_checksum_address(borrower)
-                    ).build_transaction({
-                        "chainId":              8453,
-                        "gas":                  60_000,
-                        "maxFeePerGas":         base_fee * 2 + 50_000_000,
-                        "maxPriorityFeePerGas": 50_000_000,
-                        "nonce":                self._w3.eth.get_transaction_count(self._owner, "pending"),
-                        "from":                 self._owner,
-                    })
-                    signed  = self._account.sign_transaction(tx)
-                    raw     = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
-                    tx_hash = self._w3.eth.send_raw_transaction(raw)
-                    h = self._w3.to_hex(tx_hash)
-                finally:
-                    fcntl.flock(_lf, fcntl.LOCK_UN)
 
-            log.info(f"recorded execution  borrower={borrower[:10]}…  tx={h}")
-            return h
-        except Exception as exc:
-            log.warning(f"recordExecution failed for {borrower[:10]}…: {exc}")
-            return None
+        borrower_addr = Web3.to_checksum_address(borrower)
+
+        for attempt in range(1, max_attempts + 1):
+            # Pre-check: skip if already executed or no active rights (nothing to reclaim)
+            try:
+                _, _, _, executed, active = self._contract.functions.getRights(borrower_addr).call()
+                if executed:
+                    log.info(f"recordExecution already confirmed on-chain  borrower={borrower[:10]}…")
+                    return "already-executed"
+                if not active:
+                    log.warning(f"recordExecution: no active rights  borrower={borrower[:10]}… — stake unrecoverable")
+                    return None
+            except Exception as exc:
+                log.warning(f"getRights pre-check failed (attempt {attempt})  borrower={borrower[:10]}…: {exc}")
+
+            try:
+                with open(SIGNER_LOCK, "w") as _lf:
+                    fcntl.flock(_lf, fcntl.LOCK_EX)
+                    try:
+                        base_fee = self._w3.eth.get_block("latest").get("baseFeePerGas", 1_000_000)
+                        tip      = max(base_fee, 50_000_000)  # at least 0.05 gwei
+                        tx = self._contract.functions.recordExecution(borrower_addr).build_transaction({
+                            "chainId":              8453,
+                            "gas":                  80_000,
+                            "maxFeePerGas":         base_fee * 2 + tip,
+                            "maxPriorityFeePerGas": tip,
+                            "nonce":                self._w3.eth.get_transaction_count(self._owner, "pending"),
+                            "from":                 self._owner,
+                        })
+                        signed  = self._account.sign_transaction(tx)
+                        raw     = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
+                        tx_hash = self._w3.eth.send_raw_transaction(raw)
+                        h = self._w3.to_hex(tx_hash)
+                    finally:
+                        fcntl.flock(_lf, fcntl.LOCK_UN)
+
+                receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=45)
+                if receipt["status"] == 1:
+                    log.info(f"recordExecution confirmed  borrower={borrower[:10]}…  tx={h}  gas={receipt['gasUsed']}")
+                    return h
+                else:
+                    log.warning(f"recordExecution REVERTED  attempt={attempt}/{max_attempts}  borrower={borrower[:10]}…  tx={h}")
+
+            except Exception as exc:
+                log.warning(f"recordExecution error  attempt={attempt}/{max_attempts}  borrower={borrower[:10]}…: {exc}")
+
+            if attempt < max_attempts:
+                import time as _time
+                _time.sleep(3)
+
+        log.error(f"recordExecution FAILED all {max_attempts} attempts  borrower={borrower[:10]}… — STAKE AT RISK")
+        return None
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────
