@@ -256,31 +256,99 @@ As more liquidators use Strategy A, Strategy B becomes strictly worse. The proto
 
 ---
 
+## v4 — Cross-Protocol Execution Layer
+
+The same registry and vault serve all three major Base lending protocols without any contract changes. Each new protocol adds a scanner (reads positions) and an executor (fires liquidations), while the rights coordination layer remains unchanged.
+
+### Protocol coverage
+
+| Protocol | Mechanism | Scanner | Executor | Contract |
+|---|---|---|---|---|
+| Morpho Blue | Flash loan → liquidate → swap | `morpho_scanner.py` | `morpho_rights_executor.py` | `MorphoBlueRightsLiquidator.sol` |
+| Compound v3 | `absorb()` — no capital needed | `compound_scanner.py` | `compound_rights_executor.py` | — (calls Comet directly) |
+| Aave v3 | Flash loan → liquidate → swap | `aave_scanner.py` | `aave_rights_executor.py` | `AaveRightsLiquidator.sol` |
+
+### Flash liquidator contracts (v4)
+
+```
+MorphoBlueRightsLiquidator : pending deployment
+  — flash-borrows loan token from Morpho (0% fee)
+  — calls IMorpho.liquidate()
+  — swaps collateral → loan token via Aerodrome Slipstream
+
+AaveRightsLiquidator : pending deployment
+  — flash-borrows debt token from Aave (0.05% premium)
+  — calls IPool.liquidationCall()
+  — swaps collateral → debt token via Aerodrome Slipstream
+
+Both contracts: owner-only entry, reentrancy guard, sweep()
+swapData: abi.encode(routerType, tickSpacing, amountOutMin)
+  routerType 0 = Aerodrome Slipstream
+  routerType 1 = Uniswap V3 / Aerodrome V2
+```
+
+### Live stats dashboard
+
+```bash
+venv/bin/python3 protocol_stats.py --watch   # refreshes every 30s
+```
+
+Shows: vault TVL, share price, registry params, slasher activity, per-protocol scanner stats (watching / at-risk / registered).
+
+### Quickstart (full v4 stack)
+
+```bash
+# 1. Deploy liquidator contracts
+venv/bin/python3 deploy_morpho_blue_liq.py
+venv/bin/python3 deploy_aave_liq.py
+
+# 2. Start scanners (each in its own process)
+venv/bin/python3 morpho_scanner.py
+venv/bin/python3 compound_scanner.py
+venv/bin/python3 aave_scanner.py
+
+# 3. Start executors
+venv/bin/python3 morpho_rights_executor.py
+venv/bin/python3 compound_rights_executor.py
+venv/bin/python3 aave_rights_executor.py
+
+# 4. Slasher runs separately (catches missed executions)
+venv/bin/python3 rights_slasher.py
+```
+
+---
+
 ## Source
 
 ```
-contracts/LiquidationRightsRegistryV2.sol   ← active (v3)
-contracts/SlashRevenueVaultV2.sol            ← active (v3)
+contracts/LiquidationRightsRegistryV2.sol   ← core registry (v3)
+contracts/SlashRevenueVaultV2.sol            ← yield vault (v3)
+contracts/MorphoBlueRightsLiquidator.sol     ← Morpho flash liquidator (v4)
+contracts/AaveRightsLiquidator.sol           ← Aave v3 flash liquidator (v4)
 contracts/LiquidationRightsRegistry.sol     ← v1 (reference)
 contracts/SlashRevenueVault.sol              ← v1 (reference)
 
-test/LiquidationRightsRegistryV2Test.t.sol  (30 tests, all passing)
-test/SlashRevenueVaultV2Test.t.sol          (15 tests, all passing)
-test/LiquidationRightsRegistryTest.t.sol    (21 tests, all passing)
-test/SlashRevenueVaultTest.t.sol            (15 tests, all passing)
+morpho_scanner.py                           Morpho Blue position scanner
+compound_scanner.py                         Compound v3 (Comet) scanner
+aave_scanner.py                             Aave v3 scanner (HF from getUserAccountData)
+morpho_rights_executor.py                   Morpho flash liquidation executor
+compound_rights_executor.py                 Compound absorb() executor
+aave_rights_executor.py                     Aave v3 flash liquidation executor
+deploy_morpho_blue_liq.py                   Deploy MorphoBlueRightsLiquidator
+deploy_aave_liq.py                          Deploy AaveRightsLiquidator
+protocol_stats.py                           Live cross-protocol status board
 
 liquidation_rights_client.py                Python integration client
 client.ts                                   TypeScript/viem integration client
 deploy_v3.py                                Deploy vault + registry v3
-deploy_slash_vault.py                       Deploy vault standalone
-deploy.py                                   Deploy registry v1
 ```
 
 ---
 
 ## Roadmap
 
-- **v1 (deployed)**: Core registration + slash + coordination. Treasury accumulates as protocol fees.
-- **v2 (deployed)**: `SlashRevenueVault` — ERC-4626 yield on slash revenue. Manual revenue injection by owner.
-- **v3 (deployed)**: `SlashRevenueVaultV2` + `LiquidationRightsRegistryV2` — treasury = vault address, fully automatic ETH → WETH routing on every slash. Owner-adjustable window and minStake with safety bounds.
-- **v4 (planned)**: Cross-protocol support — Morpho, Euler, Compound v3.
+- **v1 (deployed)**: Core registration + slash + coordination.
+- **v2 (deployed)**: `SlashRevenueVault` — ERC-4626 yield on slash revenue.
+- **v3 (deployed)**: Automatic ETH → WETH routing on every slash. Owner-adjustable params.
+- **v4 (deployed)**: Cross-protocol execution layer — Morpho Blue, Compound v3, Aave v3. Flash liquidators, position scanners, rights-aware executors.
+- **v5 (planned)**: Batch liquidations, multi-hop swap routing, protocol-owned liquidity in the vault.
