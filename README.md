@@ -212,15 +212,62 @@ As more liquidators use Strategy A, Strategy B becomes strictly worse. The proto
 
 ```
 contracts/LiquidationRightsRegistry.sol
-foundry/LiquidationRightsRegistryTest.t.sol   (21 tests, all passing)
-liquidation_rights_client.py                  (Python integration client)
-deploy_rights_registry.py                     (deployment script)
+contracts/SlashRevenueVault.sol
+test/LiquidationRightsRegistryTest.t.sol   (21 tests, all passing)
+test/SlashRevenueVaultTest.t.sol           (15 tests, all passing)
+liquidation_rights_client.py               (Python integration client)
+client.ts                                  (TypeScript/viem integration client)
+deploy_rights_registry.py
+deploy_slash_vault.py
+```
+
+---
+
+## v2 — SlashRevenueVault (srvETH)
+
+**ERC-4626 yield vault powered by slash revenue.**
+
+Anyone can deposit WETH and earn yield from the protocol's slash activity — no liquidation infrastructure needed.
+
+```
+Network  : Base Mainnet (chain ID 8453)
+Address  : [PENDING DEPLOYMENT]
+Asset    : WETH (0x4200000000000000000000000000000000000006)
+Share    : srvETH
+```
+
+**How yield accrues:**
+1. Liquidator registers on a borrower, stakes ETH.
+2. They miss their 10-minute window (doesn't execute the liquidation).
+3. Anyone calls `slash(borrower)` — 50% bounty to slasher, 50% to treasury.
+4. Treasury owner calls `vault.addRevenue{value: amount}()`.
+5. `totalAssets()` increases, `totalSupply()` unchanged → srvETH share price rises.
+6. All depositors earn proportional yield on their WETH.
+
+There are no fees, no lock periods, and no minimum deposit. The only yield source is protocol revenue. If no registrations are slashed, the share price stays flat.
+
+```typescript
+// TypeScript — deposit WETH, receive srvETH
+import { createPublicClient, createWalletClient, http } from 'viem'
+import { base } from 'viem/chains'
+import { REGISTRY_ABI } from './client'
+
+const VAULT = '0x[PENDING]'
+const WETH  = '0x4200000000000000000000000000000000000006'
+
+// Approve WETH, then deposit
+await walletClient.writeContract({
+  address: VAULT,
+  abi: VAULT_ABI,
+  functionName: 'deposit',
+  args: [parseEther('1'), myAddress],   // deposit 1 WETH, receive srvETH
+})
 ```
 
 ---
 
 ## Roadmap
 
-- **v1 (now)**: Core registration + slash + coordination. Deployed. Public.
-- **v2**: LP yield vault. Treasury becomes a managed ERC-4626 vault. Depositors earn yield from slash revenue passively.
-- **v3**: Cross-protocol. Extend coordination layer to Morpho, Euler, Compound v3 positions on Base.
+- **v1 (deployed)**: Core registration + slash + coordination.
+- **v2 (built, pending deployment)**: `SlashRevenueVault` — ERC-4626 yield on slash revenue. Anyone earns passively.
+- **v3**: Registry treasury → vault address, automatic revenue routing. Cross-protocol: Morpho, Euler, Compound v3.
