@@ -231,7 +231,7 @@ Anyone can deposit WETH and earn yield from the protocol's slash activity — no
 
 ```
 Network  : Base Mainnet (chain ID 8453)
-Address  : [PENDING DEPLOYMENT]
+Address  : 0x563666C16Ae4B6096245608CF10a453C7389A6CD
 Asset    : WETH (0x4200000000000000000000000000000000000006)
 Share    : srvETH
 ```
@@ -252,7 +252,7 @@ import { createPublicClient, createWalletClient, http } from 'viem'
 import { base } from 'viem/chains'
 import { REGISTRY_ABI } from './client'
 
-const VAULT = '0x[PENDING]'
+const VAULT = '0x563666C16Ae4B6096245608CF10a453C7389A6CD'
 const WETH  = '0x4200000000000000000000000000000000000006'
 
 // Approve WETH, then deposit
