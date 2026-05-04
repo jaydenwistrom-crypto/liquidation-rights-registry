@@ -1,6 +1,6 @@
 # Liquidation Rights Protocol
 
-**Base Mainnet** · `LiquidationRightsRegistry`
+**Base Mainnet** · `LiquidationRightsRegistryV2`
 
 ---
 
@@ -14,9 +14,9 @@ Gas wars are a tax on coordination failure. The winners pay for the losers' mist
 
 ## What this protocol does
 
-A liquidator stakes a small amount of ETH to claim **priority rights** on a specific borrower address for a 10-minute window. During that window, the registered liquidator executes the liquidation through their own infrastructure — whatever contracts they use — and then calls `recordExecution()` to reclaim their stake.
+A liquidator stakes a small amount of ETH to claim **priority rights** on a specific borrower address for a time-bounded window. During that window, the registered liquidator executes the liquidation through their own infrastructure — whatever contracts they use — and then calls `recordExecution()` to reclaim their stake.
 
-If they don't execute within the window, anyone can call `slash()` to collect 50% of the stake as a bounty. The other 50% accumulates in a treasury (future LP yield vault).
+If they don't execute within the window, anyone can call `slash()` to collect 50% of the stake as a bounty. The other 50% routes automatically to the `SlashRevenueVaultV2` — wrapping to WETH and immediately increasing the srvETH share price for all depositors.
 
 The protocol does not restrict Aave's permissionless `liquidationCall`. It creates an **economic coordination layer**: respecting registrations is strictly more profitable than ignoring them, because the alternative is competing in a gas war where the expected value is negative for most participants.
 
@@ -28,7 +28,7 @@ The protocol does not restrict Aave's permissionless `liquidationCall`. It creat
 1. Target enters at-risk zone (HF drops below ~1.05)
 
 2. Liquidator calls register(borrower) with >= 0.005 ETH stake
-   → receives priority rights for 10 minutes
+   → receives priority rights for the current window (10 min default)
 
 3. Liquidator executes the Aave liquidation via their own contracts
    → no change to their existing liquidation infrastructure
@@ -41,29 +41,41 @@ The protocol does not restrict Aave's permissionless `liquidationCall`. It creat
 4b. Window expires without execution
    → anyone calls slash(borrower)
    → slasher receives 50% of stake as bounty
-   → 50% goes to treasury
+   → 50% ETH routes to SlashRevenueVaultV2.receive()
+   → auto-wrapped to WETH
+   → srvETH share price rises for all depositors
 ```
 
 ---
 
-## Contract
+## Contracts (v3 — current)
 
 ```
-Network  : Base Mainnet (chain ID 8453)
-Address  : 0x8014d6bef9f17168E7b0Ea3CeacC57609e51ceEf
-Verified : Basescan
+Network : Base Mainnet (chain ID 8453)
+
+LiquidationRightsRegistryV2 : 0x51f338c1c1721d74b5feFAfbA5f067f7F850226A
+SlashRevenueVaultV2          : 0xe792bcD8f6Eb30eAFE3a99dC87693F098839d77F
+  Asset    : WETH (0x4200000000000000000000000000000000000006)
+  Share    : srvETH
+```
+
+### Previous versions
+
+```
+LiquidationRightsRegistry (v1) : 0x8014d6bef9f17168E7b0Ea3CeacC57609e51ceEf
+SlashRevenueVault (v1)          : 0x563666C16Ae4B6096245608CF10a453C7389A6CD
 ```
 
 ### Key parameters
 
 | Parameter | Value |
 |---|---|
-| `WINDOW` | 10 minutes |
-| `MIN_STAKE` | 0.005 ETH |
-| `SLASH_BOUNTY_BPS` | 5000 (50% to slasher) |
-| Treasury | Protocol treasury (v2: LP yield vault) |
+| `SLASH_BOUNTY_BPS` | 5000 (50% to slasher — protocol invariant) |
+| `window` | 10 minutes (owner-adjustable: 5–60 min) |
+| `minStake` | 0.005 ETH (owner-adjustable: 0.001–1 ETH) |
+| Treasury | `SlashRevenueVaultV2` — automatic revenue routing |
 
-### Interface
+### Registry interface
 
 ```solidity
 // Stake ETH to claim rights on a borrower.
@@ -74,6 +86,7 @@ function register(address borrower) external payable;
 function recordExecution(address borrower) external;
 
 // Slash an expired rights holder. Caller gets 50% of their stake.
+// Remaining 50% routes automatically to the yield vault.
 function slash(address borrower) external;
 
 // Check if a specific address holds active rights.
@@ -88,6 +101,41 @@ function getRights(address borrower) external view returns (
     bool    executed,
     bool    active
 );
+
+// Protocol version.
+function version() external pure returns (string memory); // "2.0.0"
+```
+
+---
+
+## SlashRevenueVaultV2 (srvETH)
+
+**ERC-4626 yield vault powered by automatic slash revenue.**
+
+Anyone can deposit WETH and earn yield from the protocol's slash activity — no liquidation infrastructure needed.
+
+**How yield accrues (v3 — fully automatic):**
+1. Liquidator registers on a borrower, stakes ETH.
+2. They miss their window (doesn't execute the liquidation).
+3. Anyone calls `slash(borrower)` — 50% bounty to slasher, 50% ETH sent to vault.
+4. Vault's `receive()` auto-wraps ETH → WETH.
+5. `totalAssets()` increases, `totalSupply()` unchanged → srvETH share price rises.
+6. All depositors earn proportional yield. No manual step required.
+
+There are no fees, no lock periods, and no minimum deposit. The only yield source is protocol revenue. If no registrations are slashed, the share price stays flat.
+
+```typescript
+// TypeScript — deposit WETH, receive srvETH
+const VAULT = '0xe792bcD8f6Eb30eAFE3a99dC87693F098839d77F'
+const WETH  = '0x4200000000000000000000000000000000000006'
+
+// Approve WETH, then deposit
+await walletClient.writeContract({
+  address: VAULT,
+  abi: VAULT_ABI,
+  functionName: 'deposit',
+  args: [parseEther('1'), myAddress],   // deposit 1 WETH, receive srvETH
+})
 ```
 
 ---
@@ -131,7 +179,7 @@ Full TypeScript client: [`client.ts`](client.ts)
 ```python
 from web3 import Web3
 
-REGISTRY = "0x8014d6bef9f17168E7b0Ea3CeacC57609e51ceEf"
+REGISTRY = "0x51f338c1c1721d74b5feFAfbA5f067f7F850226A"
 REGISTRY_ABI = [...]  # see liquidation_rights_client.py
 
 w3 = Web3(Web3.HTTPProvider("https://mainnet.base.org"))
@@ -176,17 +224,17 @@ Full Python client: [`liquidation_rights_client.py`](liquidation_rights_client.p
 | Register → someone else fires | Your stake stays locked until window expires, then you can claim a refund by re-registering. Or wait for the slasher bounty if they forfeited. |
 | Don't register, compete raw | Gas war. Expected value decreases as more bots compete. |
 
-The dominant strategy: register on any target you intend to liquidate. The coordination cost (0.005 ETH stake, ~$11) is trivial against even a $500 liquidation profit.
+The dominant strategy: register on any target you intend to liquidate. The coordination cost (0.005 ETH stake) is trivial against even a modest liquidation profit.
 
-### For everyone else (v2 — LP vault)
+### For passive yield earners (v3 — automatic)
 
-The 50% treasury share from every slashed registration accumulates. In v2, the treasury becomes a yield-bearing LP vault: deposit ETH, earn yield from failed liquidation registrations. No liquidation infrastructure required.
+The 50% treasury share from every slashed registration routes directly to `SlashRevenueVaultV2`. Deposit WETH, receive srvETH, earn yield automatically as the protocol accrues slash revenue. No liquidation infrastructure required, no manual revenue injection — every slash increases your share price in the same block.
 
 ---
 
 ## Outbidding
 
-If a registered liquidator is slow and you're faster, stake 2x their amount to unseat them. Their original stake is immediately refunded. You take priority for the next 10 minutes.
+If a registered liquidator is slow and you're faster, stake 2x their amount to unseat them. Their original stake is immediately refunded. You take priority for the next window period.
 
 This creates a price discovery mechanism for liquidation priority: the market determines what exclusive windows are worth based on the profit available in the position.
 
@@ -211,63 +259,28 @@ As more liquidators use Strategy A, Strategy B becomes strictly worse. The proto
 ## Source
 
 ```
-contracts/LiquidationRightsRegistry.sol
-contracts/SlashRevenueVault.sol
-test/LiquidationRightsRegistryTest.t.sol   (21 tests, all passing)
-test/SlashRevenueVaultTest.t.sol           (15 tests, all passing)
-liquidation_rights_client.py               (Python integration client)
-client.ts                                  (TypeScript/viem integration client)
-deploy_rights_registry.py
-deploy_slash_vault.py
-```
+contracts/LiquidationRightsRegistryV2.sol   ← active (v3)
+contracts/SlashRevenueVaultV2.sol            ← active (v3)
+contracts/LiquidationRightsRegistry.sol     ← v1 (reference)
+contracts/SlashRevenueVault.sol              ← v1 (reference)
 
----
+test/LiquidationRightsRegistryV2Test.t.sol  (30 tests, all passing)
+test/SlashRevenueVaultV2Test.t.sol          (15 tests, all passing)
+test/LiquidationRightsRegistryTest.t.sol    (21 tests, all passing)
+test/SlashRevenueVaultTest.t.sol            (15 tests, all passing)
 
-## v2 — SlashRevenueVault (srvETH)
-
-**ERC-4626 yield vault powered by slash revenue.**
-
-Anyone can deposit WETH and earn yield from the protocol's slash activity — no liquidation infrastructure needed.
-
-```
-Network  : Base Mainnet (chain ID 8453)
-Address  : 0x563666C16Ae4B6096245608CF10a453C7389A6CD
-Asset    : WETH (0x4200000000000000000000000000000000000006)
-Share    : srvETH
-```
-
-**How yield accrues:**
-1. Liquidator registers on a borrower, stakes ETH.
-2. They miss their 10-minute window (doesn't execute the liquidation).
-3. Anyone calls `slash(borrower)` — 50% bounty to slasher, 50% to treasury.
-4. Treasury owner calls `vault.addRevenue{value: amount}()`.
-5. `totalAssets()` increases, `totalSupply()` unchanged → srvETH share price rises.
-6. All depositors earn proportional yield on their WETH.
-
-There are no fees, no lock periods, and no minimum deposit. The only yield source is protocol revenue. If no registrations are slashed, the share price stays flat.
-
-```typescript
-// TypeScript — deposit WETH, receive srvETH
-import { createPublicClient, createWalletClient, http } from 'viem'
-import { base } from 'viem/chains'
-import { REGISTRY_ABI } from './client'
-
-const VAULT = '0x563666C16Ae4B6096245608CF10a453C7389A6CD'
-const WETH  = '0x4200000000000000000000000000000000000006'
-
-// Approve WETH, then deposit
-await walletClient.writeContract({
-  address: VAULT,
-  abi: VAULT_ABI,
-  functionName: 'deposit',
-  args: [parseEther('1'), myAddress],   // deposit 1 WETH, receive srvETH
-})
+liquidation_rights_client.py                Python integration client
+client.ts                                   TypeScript/viem integration client
+deploy_v3.py                                Deploy vault + registry v3
+deploy_slash_vault.py                       Deploy vault standalone
+deploy.py                                   Deploy registry v1
 ```
 
 ---
 
 ## Roadmap
 
-- **v1 (deployed)**: Core registration + slash + coordination.
-- **v2 (built, pending deployment)**: `SlashRevenueVault` — ERC-4626 yield on slash revenue. Anyone earns passively.
-- **v3**: Registry treasury → vault address, automatic revenue routing. Cross-protocol: Morpho, Euler, Compound v3.
+- **v1 (deployed)**: Core registration + slash + coordination. Treasury accumulates as protocol fees.
+- **v2 (deployed)**: `SlashRevenueVault` — ERC-4626 yield on slash revenue. Manual revenue injection by owner.
+- **v3 (deployed)**: `SlashRevenueVaultV2` + `LiquidationRightsRegistryV2` — treasury = vault address, fully automatic ETH → WETH routing on every slash. Owner-adjustable window and minStake with safety bounds.
+- **v4 (planned)**: Cross-protocol support — Morpho, Euler, Compound v3.

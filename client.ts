@@ -42,7 +42,10 @@ import { privateKeyToAccount } from 'viem/accounts'
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 export const REGISTRY_ADDRESS: Address =
-  '0x8014d6bef9f17168E7b0Ea3CeacC57609e51ceEf'
+  '0x51f338c1c1721d74b5feFAfbA5f067f7F850226A'   // LiquidationRightsRegistryV2
+
+export const REGISTRY_ADDRESS_V1: Address =
+  '0x8014d6bef9f17168E7b0Ea3CeacC57609e51ceEf'   // v1 — reference only
 
 export const REGISTRY_ABI = [
   {
