@@ -67,17 +67,15 @@ RPC_FALLBACK = os.environ.get("BASE_POLLING_RPC_URL",  "https://base-rpc.publicn
 # Morpho Blue — same address on all EVM chains
 MORPHO_ADDR  = Web3.to_checksum_address("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb")
 
-# Default: backfill last ~3 months (4.5M blocks).  Override via env to go deeper.
-# Full history (~Aug 2023) requires an archive node; recent positions are sufficient
-# for the rights protocol — anyone who hasn't repaid in 3 months is either liquidated
-# or still active and catchable via live events going forward.
-_BACKFILL_LOOKBACK   = int(os.environ.get("MORPHO_BACKFILL_LOOKBACK", "4_500_000"))
+# Default: keep startup backfills small. Override via env for deeper archival sweeps.
+_BACKFILL_LOOKBACK   = int(os.environ.get("MORPHO_BACKFILL_LOOKBACK", "10_000"))
 MORPHO_START_BLOCK   = int(os.environ.get("MORPHO_START_BLOCK", "0"))   # 0 = auto
 
 POLL_INTERVAL       = int(os.environ.get("MORPHO_POLL_INTERVAL", "30"))    # seconds
 REGISTER_THRESHOLD  = float(os.environ.get("MORPHO_REGISTER_THRESHOLD", "1.08"))
 WATCH_THRESHOLD     = float(os.environ.get("MORPHO_WATCH_THRESHOLD", "1.15"))
 EVENT_CHUNK         = int(os.environ.get("MORPHO_EVENT_CHUNK", "2000"))     # blocks per eth_getLogs
+REGISTRATION_RECHECK_SECONDS = int(os.environ.get("MORPHO_REGISTRATION_RECHECK_SECONDS", "900"))
 
 # ── Pre-computed topic hashes ─────────────────────────────────────────────────
 
@@ -178,12 +176,16 @@ class ScannerStats:
 
 # ── Singleton lock ─────────────────────────────────────────────────────────────
 
+_LOCK_FD = None
+
 def _acquire_lock() -> None:
+    global _LOCK_FD
     _lf = open(SCANNER_LOCK, "w")
     try:
         fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(f"Another morpho_scanner is already running ({SCANNER_LOCK}). Exiting.")
+    _LOCK_FD = _lf
 
 _acquire_lock()
 
@@ -479,10 +481,11 @@ def _poll_hf_all() -> None:
             _register_position(entry, hf)
 
         elif hf <= REGISTER_THRESHOLD and entry.is_registered:
-            # Check if rights are still active; if window expired re-register
-            if not _rights.we_hold_rights(entry.borrower):
-                entry.is_registered = False
-                _register_position(entry, hf)
+            age = int(time.time()) - entry.registered_at
+            if age > REGISTRATION_RECHECK_SECONDS:
+                if not _rights.we_hold_rights(entry.borrower):
+                    entry.is_registered = False
+                    _register_position(entry, hf)
 
         log.debug("hf=%.4f  market=%s  borrower=%s  registered=%s",
                   hf, entry.market_id[:12], entry.borrower[:12], entry.is_registered)
@@ -509,14 +512,16 @@ def _register_position(entry: WatchEntry, hf: float) -> None:
         return
 
     tx = _rights.register(entry.borrower)
+    entry.registered_at = int(time.time())
     if tx:
         entry.is_registered = True
-        entry.registered_at = int(time.time())
         _stats.registrations += 1
         log.info("registered  borrower=%s  hf=%.4f  market=%s  tx=%s",
                  entry.borrower[:12], hf, entry.market_id[:12], tx)
     else:
-        log.warning("registration failed  borrower=%s  hf=%.4f", entry.borrower[:12], hf)
+        entry.is_registered = False
+        log.warning("registration failed  borrower=%s  hf=%.4f — will retry after %ds",
+                    entry.borrower[:12], hf, REGISTRATION_RECHECK_SECONDS)
 
 
 # ── Live event poll ───────────────────────────────────────────────────────────

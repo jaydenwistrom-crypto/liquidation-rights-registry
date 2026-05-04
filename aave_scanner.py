@@ -69,6 +69,7 @@ REGISTER_THRESHOLD = float(os.environ.get("AAVE_REGISTER_THRESHOLD", "1.08"))
 WATCH_THRESHOLD    = float(os.environ.get("AAVE_WATCH_THRESHOLD",    "1.20"))
 _BACKFILL_LOOKBACK = int(os.environ.get("AAVE_BACKFILL_LOOKBACK",   "2_000_000"))
 _LOG_CHUNK   = int(os.environ.get("AAVE_LOG_CHUNK",   "2000"))
+REGISTRATION_RECHECK_SECONDS = int(os.environ.get("AAVE_REGISTRATION_RECHECK_SECONDS", "900"))
 
 AAVE_POOL = Web3.to_checksum_address("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5")
 
@@ -108,12 +109,16 @@ _POOL_ABI = [
 
 # ── Singleton lock ─────────────────────────────────────────────────────────────
 
+_LOCK_FD = None
+
 def _acquire_lock() -> None:
+    global _LOCK_FD
     _lf = open(SCANNER_LOCK, "w")
     try:
         fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(f"Another aave_scanner is already running ({SCANNER_LOCK}). Exiting.")
+    _LOCK_FD = _lf
 
 _acquire_lock()
 
@@ -148,6 +153,8 @@ class WatchEntry:
     total_debt:        int   = 0   # USD base (8 decimals)
     is_registered:     bool  = False
     registered_at:     int   = 0
+    registration_status: str = "unregistered"
+    registration_tx:    str  = ""
     first_seen_block:  int   = 0
 
 @dataclass
@@ -183,6 +190,8 @@ def _save_state() -> None:
                 "total_debt":      e.total_debt,
                 "is_registered":   e.is_registered,
                 "registered_at":   e.registered_at,
+                "registration_status": e.registration_status,
+                "registration_tx":  e.registration_tx,
                 "first_seen_block": e.first_seen_block,
             }
             for e in _watchlist.values()
@@ -203,6 +212,8 @@ def _save_positions() -> None:
             "total_debt":       e.total_debt,
             "is_registered":    e.is_registered,
             "registered_at":    e.registered_at,
+            "registration_status": e.registration_status,
+            "registration_tx":   e.registration_tx,
         }
         for e in _watchlist.values()
     }
@@ -227,6 +238,8 @@ def _load_state() -> None:
                 total_debt=row.get("total_debt", 0),
                 is_registered=row.get("is_registered", False),
                 registered_at=row.get("registered_at", 0),
+                registration_status=row.get("registration_status", "unknown"),
+                registration_tx=row.get("registration_tx", ""),
                 first_seen_block=row.get("first_seen_block", 0),
             )
         log.info("state loaded  watching=%d  last_event_block=%d",
@@ -269,7 +282,7 @@ def _backfill(current_block: int) -> None:
         try:
             logs = w3_pub.eth.get_logs({
                 "address":   AAVE_POOL,
-                "topics":    [_T_BORROW],
+                "topics":    [["0x" + _T_BORROW]],
                 "fromBlock": cur,
                 "toBlock":   end,
             })
@@ -300,7 +313,7 @@ def _poll_new_borrows() -> None:
     try:
         logs = w3.eth.get_logs({
             "address":   AAVE_POOL,
-            "topics":    [_T_BORROW],
+            "topics":    [["0x" + _T_BORROW]],
             "fromBlock": from_block,
             "toBlock":   to_block,
         })
@@ -354,13 +367,21 @@ def _poll_hf() -> None:
         if hf < REGISTER_THRESHOLD and not entry.is_registered:
             _register_position(entry)
         elif hf < REGISTER_THRESHOLD and entry.is_registered:
-            if not rights.we_hold_rights(entry.borrower):
-                entry.is_registered = False
-                _register_position(entry)
+            # Do not re-check on-chain rights immediately after submission.
+            # Registration txs can remain pending under nonce/base-fee pressure,
+            # and treating "not confirmed yet" as "not registered" burns gas.
+            age = int(time.time()) - entry.registered_at
+            if age > REGISTRATION_RECHECK_SECONDS:
+                if rights.we_hold_rights(entry.borrower):
+                    entry.registration_status = "active"
+                else:
+                    entry.is_registered = False
+                    entry.registration_status = "expired_or_missing"
+                    _register_position(entry)
 
         if hf < REGISTER_THRESHOLD:
-            log.info("at-risk  borrower=%s  hf=%.4f  registered=%s",
-                     entry.borrower[:12], hf, entry.is_registered)
+            log.info("at-risk  borrower=%s  hf=%.4f  registered=%s  status=%s",
+                     entry.borrower[:12], hf, entry.is_registered, entry.registration_status)
 
         # Prune healthy positions to keep watchlist lean
         if hf > WATCH_THRESHOLD and not entry.is_registered:
@@ -382,18 +403,26 @@ def _register_position(entry: WatchEntry) -> None:
                  entry.borrower[:12], entry.last_hf)
         entry.is_registered = True
         entry.registered_at = int(time.time())
+        entry.registration_status = "dry_run"
+        entry.registration_tx = ""
         _stats.registrations += 1
         return
 
     tx = rights.register(entry.borrower)
+    entry.registered_at = int(time.time())
     if tx:
         entry.is_registered = True
-        entry.registered_at = int(time.time())
+        entry.registration_status = "active" if tx == "already-active" else "submitted"
+        entry.registration_tx = tx
         _stats.registrations += 1
         log.info("registered  borrower=%s  hf=%.4f  tx=%s",
                  entry.borrower[:12], entry.last_hf, tx)
     else:
-        log.warning("registration failed  borrower=%s", entry.borrower[:12])
+        entry.is_registered = False
+        entry.registration_status = "deferred"
+        entry.registration_tx = ""
+        log.warning("registration failed  borrower=%s — will retry after %ds",
+                    entry.borrower[:12], REGISTRATION_RECHECK_SECONDS)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

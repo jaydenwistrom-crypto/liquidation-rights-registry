@@ -73,7 +73,8 @@ _DEFAULT_COMETS = {
 
 POLL_INTERVAL        = int(os.environ.get("COMPOUND_POLL_INTERVAL", "30"))
 EVENT_CHUNK          = int(os.environ.get("COMPOUND_EVENT_CHUNK",   "3000"))
-BACKFILL_LOOKBACK    = int(os.environ.get("COMPOUND_BACKFILL_LOOKBACK", "2_000_000"))  # ~1 month
+BACKFILL_LOOKBACK    = int(os.environ.get("COMPOUND_BACKFILL_LOOKBACK", "10_000"))
+REGISTRATION_RECHECK_SECONDS = int(os.environ.get("COMPOUND_REGISTRATION_RECHECK_SECONDS", "900"))
 
 # ── Pre-computed topic hashes ─────────────────────────────────────────────────
 #
@@ -150,12 +151,16 @@ class ScannerStats:
 
 # ── Singleton lock ─────────────────────────────────────────────────────────────
 
+_LOCK_FD = None
+
 def _acquire_lock() -> None:
+    global _LOCK_FD
     _lf = open(SCANNER_LOCK, "w")
     try:
         fcntl.flock(_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         sys.exit(f"Another compound_scanner is already running ({SCANNER_LOCK}). Exiting.")
+    _LOCK_FD = _lf
 
 _acquire_lock()
 
@@ -425,10 +430,11 @@ def _poll_liquidatability() -> None:
         if is_liq and not entry.is_registered:
             _register_position(entry)
         elif is_liq and entry.is_registered:
-            # Check if rights still active; re-register if window expired
-            if not _rights.we_hold_rights(entry.borrower):
-                entry.is_registered = False
-                _register_position(entry)
+            age = int(time.time()) - entry.registered_at
+            if age > REGISTRATION_RECHECK_SECONDS:
+                if not _rights.we_hold_rights(entry.borrower):
+                    entry.is_registered = False
+                    _register_position(entry)
 
         if is_liq:
             log.info("liquidatable!  comet=%s  borrower=%s  registered=%s",
@@ -454,14 +460,16 @@ def _register_position(entry: WatchEntry) -> None:
         return
 
     tx = _rights.register(entry.borrower)
+    entry.registered_at = int(time.time())
     if tx:
         entry.is_registered = True
-        entry.registered_at = int(time.time())
         _stats.registrations += 1
         log.info("registered  borrower=%s  comet=%s  tx=%s",
                  entry.borrower[:12], entry.comet_name, tx)
     else:
-        log.warning("registration failed  borrower=%s", entry.borrower[:12])
+        entry.is_registered = False
+        log.warning("registration failed  borrower=%s — will retry after %ds",
+                    entry.borrower[:12], REGISTRATION_RECHECK_SECONDS)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

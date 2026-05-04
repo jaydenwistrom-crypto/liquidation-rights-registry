@@ -204,11 +204,9 @@ def print_board(w: Web3) -> None:
         if sf.exists():
             try:
                 sd = json.loads(sf.read_text())
-                stats = sd.get("stats", {})
-                w_count = stats.get("watching", 0)
-                r_count = stats.get("registrations", 0)
-                sc_count = stats.get("scans", 0)
                 wl = sd.get("watchlist", [])
+                w_count = len(wl)
+                r_count = sum(1 for e in wl if e.get("is_registered"))
                 at_risk = sum(1 for e in wl if e.get("last_hf", 9) < 1.05 or e.get("is_liquidatable"))
                 total_watching  += w_count
                 total_registered += r_count
